@@ -1,5 +1,6 @@
 import random
 import uuid
+import time
 from sus.storage.redis_client import redis_client
 from sus.intent_engine import get_overlap
 from sus.tdlib_client import td_client
@@ -7,9 +8,6 @@ from sus.copy import system_messages
 from sus.config import settings
 
 async def run_matching_cycle():
-    # 1. Get all active users
-    # This is tricky with Redis without a full index.
-    # For beta (<1000 users), we can maintain a set of active users.
     active_users = await redis_client.client.smembers("active_users")
 
     eligible = []
@@ -23,7 +21,6 @@ async def run_matching_cycle():
     if len(eligible) < 2:
         return
 
-    # 2. Compute pairwise overlaps
     matches = []
     for i in range(len(eligible)):
         for j in range(i + 1, len(eligible)):
@@ -33,7 +30,6 @@ async def run_matching_cycle():
             if overlap >= settings.overlap_threshold:
                 matches.append((u1, u2, overlap))
 
-    # 3. Greedy selection
     matches.sort(key=lambda x: x[2], reverse=True)
 
     matched_today = set()
@@ -44,12 +40,10 @@ async def run_matching_cycle():
         matched_today.add(u1)
         matched_today.add(u2)
 
-        # Create bridge offer
         await create_bridge_offer(u1, u2, overlap)
 
 async def create_bridge_offer(u1: int, u2: int, overlap: int):
     conv_id = str(uuid.uuid4())
-    # State for pending offer
     offer_key = f"offer:{conv_id}"
     await redis_client.client.hset(offer_key, mapping={
         "u1": u1,
@@ -59,7 +53,6 @@ async def create_bridge_offer(u1: int, u2: int, overlap: int):
     })
     await redis_client.client.expire(offer_key, 21600) # 6 hours
 
-    # Store which conv is offered to which user
     await redis_client.client.set(f"user:{u1}:offered_conv", conv_id, ex=21600)
     await redis_client.client.set(f"user:{u2}:offered_conv", conv_id, ex=21600)
 
@@ -89,13 +82,11 @@ async def handle_offer_response(chat_id: int, text: str):
         else:
             await redis_client.client.hset(offer_key, "u2_accepted", 1)
 
-        # Check if both accepted
         updated_data = await redis_client.client.hgetall(offer_key)
         if updated_data.get("u1_accepted") == "1" and updated_data.get("u2_accepted") == "1":
             await start_conversation(conv_id, u1, u2)
 
     elif text.upper() == "NO":
-        # Decline
         await redis_client.set_user_state(u1, "ACTIVE")
         await redis_client.set_user_state(u2, "ACTIVE")
         await redis_client.client.delete(f"user:{u1}:offered_conv")
@@ -110,10 +101,13 @@ async def start_conversation(conv_id: str, u1: int, u2: int):
     await redis_client.add_to_conv(conv_id, u1)
     await redis_client.add_to_conv(conv_id, u2)
 
+    # Track for expiration
+    await redis_client.client.set(f"conv:{conv_id}:created_at", int(time.time()), ex=172800)
+    await redis_client.client.sadd("active_conversations", conv_id)
+
     await td_client.send_text(u1, system_messages.SPACE_OPENED)
     await td_client.send_text(u2, system_messages.SPACE_OPENED)
 
-    # Cleanup offer
     await redis_client.client.delete(f"user:{u1}:offered_conv")
     await redis_client.client.delete(f"user:{u2}:offered_conv")
     await redis_client.client.delete(f"offer:{conv_id}")

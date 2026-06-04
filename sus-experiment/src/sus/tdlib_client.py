@@ -1,6 +1,6 @@
 import asyncio
 from aiotdlib import Client, ClientSettings
-from aiotdlib.api import API, UpdateNewMessage, MessageText
+from aiotdlib.api import API, UpdateNewMessage, MessageText, Message
 from sus.config import settings
 import structlog
 
@@ -32,11 +32,9 @@ class TDLibClient:
         await self.client.start()
         logger.info("TDLib client started")
 
-    async def send_text(self, chat_id: int, text: str):
-        await self.client.api.send_message(
-            chat_id=chat_id,
-            input_message_content=MessageText(text=text)
-        )
+    async def send_text(self, chat_id: int, text: str) -> Message:
+        # aiotdlib's send_text returns the Message object
+        return await self.client.send_text(chat_id, text)
 
     async def delete_messages(self, chat_id: int, message_ids: list[int]):
         await self.client.api.delete_messages(

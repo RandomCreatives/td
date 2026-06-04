@@ -1,6 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sus.matcher import run_matching_cycle
 from sus.crypto.anon_hash import rotate_salt
+from sus.lifecycle import close_expired_conversations
 from sus.config import settings
 import structlog
 
@@ -25,8 +26,12 @@ def setup_scheduler():
         days=settings.salt_rotation_days
     )
 
-    # Optional: cleanup orphaned keys every 6 hours
-    # scheduler.add_job(cleanup_verifier, 'interval', hours=6)
+    # Check for expired conversations every 15 minutes
+    scheduler.add_job(
+        close_expired_conversations,
+        'interval',
+        minutes=15
+    )
 
     scheduler.start()
     logger.info("Scheduler started")

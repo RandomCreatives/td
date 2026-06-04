@@ -39,13 +39,29 @@ class RedisClient:
     async def get_conv_participants(self, conv_id: str) -> list:
         return await self.client.smembers(f"conv:{conv_id}:participants")
 
+    async def get_conv_message_ids(self, conv_id: str, chat_id: int) -> list[int]:
+        msgs = await self.client.lrange(f"conv:{conv_id}:msgs:{chat_id}", 0, -1)
+        return [int(m) for m in msgs]
+
     async def delete_conv(self, conv_id: str):
+        from sus.tdlib_client import td_client
         participants = await self.get_conv_participants(conv_id)
-        for p_id in participants:
-            await self.clear_active_conv(int(p_id))
-            await self.set_user_state(int(p_id), "active")
+        for p_id_str in participants:
+            p_id = int(p_id_str)
+            msg_ids = await self.get_conv_message_ids(conv_id, p_id)
+            if msg_ids:
+                try:
+                    await td_client.delete_messages(p_id, msg_ids)
+                except Exception:
+                    pass
+
+            await self.clear_active_conv(p_id)
+            await self.set_user_state(p_id, "ACTIVE")
+            await self.client.delete(f"conv:{conv_id}:msgs:{p_id}")
+
         await self.client.delete(f"conv:{conv_id}:participants")
         await self.client.delete(f"conv:{conv_id}:created_at")
+        await self.client.srem("active_conversations", conv_id)
 
     async def get_current_salt(self) -> str:
         return await self.client.get("salt:current")

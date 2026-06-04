@@ -1,3 +1,4 @@
+import re
 from aiotdlib.api import Message, MessageText, MessagePhoto, MessageVideo, MessageAudio, MessageDocument, MessageVoiceNote, MessageVideoNote
 from sus.tdlib_client import td_client
 from sus.storage.redis_client import redis_client
@@ -5,6 +6,14 @@ from sus.copy import system_messages
 import structlog
 
 logger = structlog.get_logger()
+
+# Heuristic for contact info: usernames (@handle), phone numbers, links
+CONTACT_INFO_PATTERN = re.compile(
+    r'(?:@\w+)|'                                 # Username
+    r'(?:\+?\d{1,4}?[-.\s]?\(?\d{1,3}?\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9})|' # Phone
+    r'(?:https?://\S+)|(?:www\.\S+)',            # Links
+    re.IGNORECASE
+)
 
 async def handle_relay(message: Message, conv_id: str):
     chat_id = message.chat_id
@@ -20,25 +29,25 @@ async def handle_relay(message: Message, conv_id: str):
     if not recipient_id:
         return
 
+    # Track incoming message for cleanup
+    await redis_client.client.lpush(f"conv:{conv_id}:msgs:{chat_id}", message.id)
+
     # Check content type
     if isinstance(message.content, MessageText):
         text = message.content.text.text
-        # Block contact info patterns (simple heuristic)
-        # In a real app, this would be more robust.
-        if "@" in text or "+" in text:
-             await td_client.send_text(chat_id, "System: Contact info patterns detected. Soft warning: Stay anonymous.")
-             # We still relay for now, or could block. Prompt says "soft warning, do not relay" for some patterns.
-             # Let's block if it looks very much like a handle or phone.
+
+        # Filter contact info
+        if CONTACT_INFO_PATTERN.search(text):
+             await td_client.send_text(chat_id, "System: Contact info or links detected. Soft warning: Stay anonymous.")
+             # Block relaying suspicious patterns
              return
 
-        await td_client.send_text(recipient_id, text)
+        # Forward message
+        sent_msg = await td_client.send_text(recipient_id, text)
 
-        # Track message IDs for deletion (optional, but requested for cleanup)
-        # Since we don't store message content, we can store message IDs in Redis
-        await redis_client.client.lpush(f"conv:{conv_id}:msgs:{chat_id}", message.id)
-        # We also need the ID of the message SENT to the recipient to delete it later.
-        # But td_client.send_text doesn't return the ID easily without more work.
-        # For simplicity in Phase I, we'll rely on the 48h auto-closure copy and burn.
+        # Track the sent message ID in the recipient's cleanup list
+        if sent_msg:
+            await redis_client.client.lpush(f"conv:{conv_id}:msgs:{recipient_id}", sent_msg.id)
 
     elif isinstance(message.content, (MessagePhoto, MessageVideo, MessageAudio, MessageDocument, MessageVoiceNote, MessageVideoNote)):
         # Block media
